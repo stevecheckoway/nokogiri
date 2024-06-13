@@ -30,17 +30,19 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
         else
           attributes[attr[:name]].value
         end
-        assert_equal(attr[:value], value, "expected #{attr}[:value] to equal #{value.inspect}")
+        assert_equal(attr[:value], value, message { "expected #{attr}[:value] to equal #{value.inspect}" })
       end
       assert_equal(
         node[:children].length,
         ng_node.children.length,
-        [
-          "Element <#{node[:tag]}> has wrong number of children #{ng_node.children.map(&:name)}",
-          "   Input: #{@test[:data]}",
-          "Expected: #{@test[:raw].join("\n          ")}",
-          "  Parsed: #{ng_node.to_html}",
-        ].join("\n"),
+        message do
+          [
+            "Element <#{node[:tag]}> has wrong number of children #{ng_node.children.map(&:name)}",
+            "   Input: #{@test[:data]}",
+            "Expected: #{@test[:raw].join("\n          ")}",
+            "  Parsed: #{ng_node.to_html}",
+          ].join("\n")
+        end,
       )
     when Nokogiri::XML::Node::TEXT_NODE, Nokogiri::XML::Node::CDATA_SECTION_NODE
       # We preserve the CDATA in the tree, but the tests represent it as text.
@@ -57,7 +59,7 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
       assert_equal(
         node[:children].length,
         ng_node.children.length,
-        "Fragment node has wrong number of children #{ng_node.children.map(&:name)} in #{@test[:data]}",
+        message { "Fragment node has wrong number of children #{ng_node.children.map(&:name)} in #{@test[:data]}" },
       )
     when Nokogiri::XML::Node::DTD_NODE
       assert_equal(:doctype, node[:type])
@@ -100,6 +102,7 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
     else
       doc = Nokogiri::HTML5.parse(@test[:data], **options)
     end
+
     # Walk the tree.
     exp_nodes = [@test[:document]]
     act_nodes = [doc]
@@ -131,7 +134,7 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
     assert_equal(
       @test[:errors].length,
       doc.errors.length,
-      "Expected #{@test[:errors].length} errors for #{@test[:data]}, found:\n#{errpayload}",
+      message { "Expected #{@test[:errors].length} errors for #{@test[:data]}, found:\n#{errpayload}" },
     )
 
     # The new, standardized tokenizer errors live in @test[:new_errors]. Let's
@@ -144,7 +147,7 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
     errors.reject! { |err| err[:code] == "generic-parser" }
     error_regex = /^\((?<line>\d+):(?<column>\d+)(?:-\d+:\d+)?\) (?<code>.*)$/
     @test[:new_errors].each do |err|
-      assert_match(error_regex, err, "New error format does not match: #{mu_pp(err)}")
+      assert_match(error_regex, err, message { "New error format does not match: #{mu_pp(err)}" })
       m = err.match(error_regex)
       line = m[:line].to_i
       column = m[:column].to_i
@@ -156,7 +159,7 @@ class TestHtml5TreeConstructionBase < Nokogiri::TestCase
       end
       # This error should be the first error in the list.
       # refute_nil(idx, "Expected to find error #{code} at #{line}:#{column}")
-      assert_equal(0, idx, "Expected to find error #{code} at #{line}:#{column} in #{@test[:data]}")
+      assert_equal(0, idx, message { "Expected to find error #{code} at #{line}:#{column} in #{@test[:data]}" })
       errors.delete_at(idx)
     end
   end
@@ -165,8 +168,12 @@ end
 module Html5libTestCaseParser
   class BadHtml5libFormat < RuntimeError; end
 
-  def self.parse_test(test_data)
-    test = { script: :off }
+  def self.parse_test(test_data, file_name, lineno)
+    test = {
+      file_name: file_name,
+      lineno: lineno,
+      script: :off,
+    }
     index = /(?:^#errors\n|\n#errors\n)/ =~ test_data
     raise(BadHtml5libFormat, "Expected #errors in\n#{test_data}") if index.nil?
 
@@ -304,47 +311,48 @@ module Html5libTestCaseParser
 
   def self.generate_tests
     tc_path = File.expand_path("../../html5lib-tests/tree-construction", __FILE__)
+    tests = []
     Dir[File.join(tc_path, "*.dat")].each do |path|
-      test_name = "TestHtml5TreeConstruction" + File.basename(path, ".dat")
-        .split(/[_-]/)
-        .map(&:capitalize)
-        .join("")
-      tests = []
+      file_name = File.basename(path)
       File.open(path, "r", encoding: "UTF-8") do |f|
+        lineno = 1
         f.each("\n\n#data\n") do |test_data|
+          test_lines = test_data.lines.length
           if test_data.start_with?("#data\n")
+            test_lines -= 1
             test_data = test_data[6..-1]
           end
           if test_data.end_with?("\n\n#data\n")
             test_data = test_data[0..-9]
           end
           begin
-            tests << parse_test(test_data)
+            tests << parse_test(test_data, file_name, lineno)
           rescue BadHtml5libFormat => e
-            warn("WARNING: #{path} is an invalid format: #{e.message}")
+            warn("WARNING: #{path}:#{lineno} is an invalid format: #{e.message}")
           end
+          lineno += test_lines
         end
       end
-
-      klass = Class.new(TestHtml5TreeConstructionBase) do
-        tests.each_with_index do |test, index|
-          define_method "test_#{index}" do
-            @test = test
-            @index = index
-            @test_context_node = false
-            run_test
-          end
-
-          define_method "test_#{index}__with_node" do
-            @test = test
-            @index = index
-            @test_context_node = true
-            run_test
-          end if test[:context]
-        end
-      end
-      Object.const_set(test_name, klass)
     end
+
+    klass = Class.new(TestHtml5TreeConstructionBase) do
+      tests.each_with_index do |test, index|
+        it "correctly parses test from #{test[:file_name]}:#{test[:lineno]}" do
+          @test = test
+          @index = index
+          @test_context_node = false
+          run_test
+        end
+
+        it "correctly parses test from #{test[:file_name]}:#{test[:lineno]} when a context node is used" do
+          @test = test
+          @index = index
+          @test_context_node = true
+          run_test
+        end if test[:context]
+      end
+    end
+    Object.const_set("TestHtml5TreeConstruction", klass)
   end
 end
 
